@@ -56,6 +56,8 @@ DEFAULTS = {
     "enable_ai": False,
     "local_ai": True,
     "local_model": "qwen3:8b",
+    "local_backend": "llamacpp",
+    "local_url": "http://127.0.0.1:8080",
     "barge_in": True,
     "mic_device": None,
     "chatter": True,

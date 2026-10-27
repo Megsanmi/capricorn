@@ -13,7 +13,9 @@ import urllib.request
 from persona import CHARACTER, SPEECH_RULES, user_context
 
 log = logging.getLogger("capri")
-URL = "http://127.0.0.1:11434"
+URL = "http://127.0.0.1:8080"
+LLAMACPP_URL = "http://127.0.0.1:8080"
+
 NO_WINDOW = 0x08000000
 SEARCH_MARK = "ПОИСК"
 NO_THINKING = "Сразу дай готовый ответ от лица Капри. Без рассуждений, без анализа вопроса, без «пользователь хочет»."
@@ -122,13 +124,17 @@ def strip_reasoning(text):
         text = text.rsplit("</think>", 1)[1]
     return re.sub(r"<think>.*", "", text, flags=re.S).strip()
 
-
-def _post(path, payload, timeout):
-    req = urllib.request.Request(URL + path, data=json.dumps(payload).encode("utf-8"),
+def _post(path, payload, timeout, url=URL):
+    req = urllib.request.Request(url + path, data=json.dumps(payload).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
+
+def _get(url, path, timeout=1.5):
+    with urllib.request.urlopen(url + path, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+    
 
 # какую модель взять, если указанной в настройках нет: сначала проверенные, «думающие» — в последнюю очередь
 PREFERRED = ["qwen3:14b", "qwen3:8b", "qwen3:4b-instruct", "qwen3:4b-instruct-2507", "qwen3:1.7b", "qwen2.5",
@@ -152,25 +158,56 @@ def pick_model(names):
 
 class LocalAI:
     def __init__(self, cfg):
-        self.model = cfg.get("local_model", "qwen3:8b")
+        self.backend = (cfg.get("local_backend") or "ollama").lower()
+        default_url = LLAMACPP_URL if self.backend == "llamacpp" else URL
+        self.url = (cfg.get("local_url") or default_url).rstrip("/")
+        self.model = cfg.get("local_model", "" if self.backend == "llamacpp" else "qwen3:8b")
         self.history = []
-        self.on_model_change = None  # main записывает новую модель в config.json
+        self.on_model_change = None
 
-    @staticmethod
-    def installed():
-        """Названия скачанных моделей или None, если Ollama не отвечает."""
+    @property
+    def is_llamacpp(self):
+        return self.backend == "llamacpp"
+
+    def installed(self):
+        """Названия моделей или None, если сервер не отвечает."""
         try:
-            with urllib.request.urlopen(URL + "/api/tags", timeout=1.5) as r:
-                return [m["name"] for m in json.loads(r.read().decode("utf-8")).get("models", [])]
+            if self.is_llamacpp:
+                data = _get(self.url, "/v1/models")
+                return [m["id"] for m in data.get("data", []) if m.get("id")]
+            data = _get(self.url, "/api/tags")
+            return [m["name"] for m in data.get("models", [])]
         except Exception:
             return None
 
     def running(self):
-        return has_model(self.installed() or [], self.model)
+        names = self.installed()
+        if names is None:
+            return False
+        if self.is_llamacpp and not self.model:
+            return bool(names)
+        return has_model(names, self.model)
 
     def start_server(self):
-        """Запускает Ollama, если она не запущена, и заранее грузит модель в память. Если указанной
-        в настройках модели нет, а другая скачана — переключается на неё и запоминает."""
+        if self.is_llamacpp:
+            # сервер и модель уже запущены пользователем — только проверяем и фиксируем имя
+            names = self.installed()
+            if names is None:
+                log.info("llama.cpp-сервер не отвечает по %s", self.url)
+                return
+            if not names:
+                log.info("llama.cpp не сообщил моделей")
+                return
+            if not self.model or not has_model(names, self.model):
+                self.model = names[0]
+                if self.on_model_change:
+                    self.on_model_change(self.model)
+                log.info("llama.cpp: использую модель %s", self.model)
+            else:
+                log.info("llama.cpp: модель %s готова", self.model)
+            return
+
+        # --- Ollama --- (без изменений)
         names = self.installed()
         if names is None:
             exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
@@ -180,7 +217,7 @@ class LocalAI:
             except OSError:
                 log.info("Ollama не установлена")
                 return
-            for _ in range(20):  # сервер поднимается пару секунд
+            for _ in range(20):
                 time.sleep(0.5)
                 names = self.installed()
                 if names is not None:
@@ -198,29 +235,61 @@ class LocalAI:
             if self.on_model_change:
                 self.on_model_change(other)
         try:
-            _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": "10m"}, 120)
+            _post("/api/generate", {"model": self.model, "prompt": "", "keep_alive": "10m"}, 120, self.url)
             log.info("Локальная модель %s загружена", self.model)
         except Exception as e:
             log.info("Не удалось прогреть модель: %s", e)
 
     def _chat(self, messages, max_tokens=300):
+        if self.is_llamacpp:
+            return self._chat_llamacpp(messages, max_tokens)
+        return self._chat_ollama(messages, max_tokens)
+
+    def _chat_ollama(self, messages, max_tokens=300):
         resp = _post("/api/chat", {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "think": False,  # Qwen3 по умолчанию «рассуждает» вслух — для голоса это лишняя задержка
+            "think": False,
             "keep_alive": "10m",
             "options": {"num_predict": max_tokens, "temperature": 0.6, "repeat_penalty": 1.15},
-        }, 120)
+        }, 120, self.url)
         text = strip_reasoning(resp.get("message", {}).get("content", ""))
         if REASONING.search(text):
-            # модель всё равно «думает» вслух — переспрашиваем, а если опять, ответа нет
             log.info("Модель %s рассуждает вслух вместо ответа", self.model)
             if messages[-1].get("content", "").startswith(NO_THINKING):
                 return ""
-            return self._chat(messages + [{"role": "system", "content": NO_THINKING}], max_tokens)
+            return self._chat_ollama(messages + [{"role": "system", "content": NO_THINKING}], max_tokens)
         return text
 
+    def _chat_llamacpp(self, messages, max_tokens=300):
+
+        payload = {
+            "model": self.model or "default",
+            "messages": messages,
+            "stream": False,
+            "max_tokens": max_tokens,
+            "temperature": 0.6,
+            "repeat_penalty": 1.15,
+            "chat_template_kwargs": {"enable_thinking": False},  # Gemma-3n, Qwen3 и др.
+        }
+        
+        try:
+            resp = _post("/v1/chat/completions", payload, 120, self.url)
+        except Exception:
+            if "chat_template_kwargs" not in payload:
+                raise
+            payload.pop("chat_template_kwargs")  # старые сборки llama.cpp
+            resp = _post("/v1/chat/completions", payload, 120, self.url)
+        text = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        text = strip_reasoning(text)
+        if REASONING.search(text):
+            log.info("Модель %s рассуждает вслух вместо ответа", self.model)
+            if messages[-1].get("content", "").startswith(NO_THINKING):
+                return ""
+            return self._chat_llamacpp(messages + [{"role": "system", "content": NO_THINKING}], max_tokens)
+        return text
+    
     def ask(self, question):
         """Текст ответа или None, если лучше открыть поиск."""
         if FRESH.search(question.lower()):
@@ -279,3 +348,5 @@ class LocalAI:
             ], max_tokens=400) or None
         except Exception:
             return None
+
+        
