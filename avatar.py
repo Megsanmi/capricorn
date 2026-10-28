@@ -248,6 +248,188 @@ def burst(c, rnd, outer):
         pts.append(QPointF(c.x() + math.cos(ang) * r, c.y() + math.sin(ang) * r))
     return QPolygonF(pts)
 
+EMOTION_COLORS = {
+    "heart": PINK, "bolt": GREEN, "star": CYAN, "spark": WHITE,
+    "note": PURPLE, "question": CYAN, "zzz": PURPLE, "exclaim": PINK,
+}
+
+
+MODE_EMOTIONS = {
+    "idle":      (("heart", 4), ("spark", 4), ("star", 2)),
+    "listening": (("spark", 5), ("star", 3), ("heart", 2), ("exclaim", 1)),
+    "thinking":  (("question", 4), ("spark", 3), ("zzz", 1)),
+    "speaking":  (("bolt", 4), ("note", 3), ("star", 2), ("heart", 2)),
+}
+
+EMOTION_RATE = {"idle": 1.4, "listening": 0.9, "thinking": 1.1, "speaking": 0.5}
+class Emotion:
+    """Парящая эмоция. Живёт ~2 сек, всплывает, покачивается, тает."""
+    __slots__ = ("kind", "x", "y", "vx", "vy", "life", "max_life",
+                 "size", "phase", "color")
+
+    def __init__(self, kind, x, y, size=None):
+        self.kind = kind
+        self.x = float(x)
+        self.y = float(y)
+        self.vx = random.uniform(-22, 22)
+        self.vy = random.uniform(-55, -32)
+        self.life = random.uniform(2.6, 3.6)
+        self.max_life = self.life
+        self.size = size if size else random.uniform(15, 22)   # крупнее
+        self.phase = random.uniform(0, math.tau)
+        self.color = EMOTION_COLORS.get(kind, WHITE)
+
+
+def _draw_heart(p, cx, cy, s, seed=0.0):
+    rnd = random.Random(seed)
+    ls = rnd.uniform(0.82, 1.20)
+    rs = rnd.uniform(0.82, 1.20)
+    notch_x = rnd.uniform(-0.22, 0.22)
+    notch_y = rnd.uniform(-0.45, -0.15)
+    tip_x = rnd.uniform(-0.20, 0.20)
+    tip_y = rnd.uniform(0.95, 1.20)
+    def J(k=0.16):
+        return 1.0 + rnd.uniform(-k, k)
+    pts = [
+        QPointF(cx + s * notch_x,         cy + s * notch_y),
+        QPointF(cx - s * 0.55 * ls * J(), cy - s * 0.95 * J()),
+        QPointF(cx - s * 1.05 * ls * J(), cy - s * 0.25 * J()),
+        QPointF(cx - s * 0.75 * ls * J(), cy + s * 0.25 * J()),
+        QPointF(cx + s * tip_x,           cy + s * tip_y * J()),
+        QPointF(cx + s * 0.75 * rs * J(), cy + s * 0.25 * J()),
+        QPointF(cx + s * 1.05 * rs * J(), cy - s * 0.25 * J()),
+        QPointF(cx + s * 0.55 * rs * J(), cy - s * 0.95 * J()),
+    ]
+    p.setBrush(PINK)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF(pts))
+
+
+def _draw_bolt(p, cx, cy, s, seed=0.0):
+    rnd = random.Random(seed)
+    # каждая излом-точка смещена по X и Y, левая/правая половины разной длины
+    top_x    = rnd.uniform(-0.18, 0.18)
+    mid1_x   = rnd.uniform(-0.65, -0.35)
+    mid2_x   = rnd.uniform(0.05, 0.30)
+    mid3_x   = rnd.uniform(-0.45, -0.20)
+    bot_x    = rnd.uniform(-0.15, 0.15)
+    top_y    = rnd.uniform(-1.05, -0.85)
+    mid1_y   = rnd.uniform(0.05, 0.22)
+    mid2_y   = rnd.uniform(0.00, 0.20)
+    mid3_y   = rnd.uniform(0.75, 1.10)
+    bot_y    = rnd.uniform(0.85, 1.15)
+    right_x  = rnd.uniform(0.45, 0.75)
+    right_y1 = rnd.uniform(-0.20, 0.05)
+    right_y2 = rnd.uniform(-0.20, 0.10)
+    pts = [
+        QPointF(cx + s * top_x,   cy + s * top_y),
+        QPointF(cx + s * mid1_x,  cy + s * mid1_y),
+        QPointF(cx + s * mid2_x,  cy + s * mid2_y),
+        QPointF(cx + s * mid3_x,  cy + s * mid3_y),
+        QPointF(cx + s * right_x, cy + s * right_y1),
+        QPointF(cx + s * right_x, cy + s * right_y2),
+        QPointF(cx + s * bot_x,   cy + s * bot_y),
+    ]
+    p.setBrush(GREEN)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF(pts))
+
+
+def _draw_star(p, cx, cy, s, seed=0.0):
+    rnd = random.Random(seed)
+    n = rnd.choice((5, 5, 6, 7))          # 5–7 лучей
+    rot = rnd.uniform(0, math.tau)
+    inner = rnd.uniform(0.32, 0.55)       # разный «размах» внутреннего радиуса
+    pts = []
+    for i in range(n * 2):
+        if i % 2 == 0:
+            r = s * rnd.uniform(0.85, 1.15)
+        else:
+            r = s * inner * rnd.uniform(0.7, 1.3)
+        ang = rot + math.pi * i / n
+        pts.append(QPointF(cx + math.cos(ang) * r, cy + math.sin(ang) * r))
+    p.setBrush(CYAN)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF(pts))
+
+
+def _draw_spark(p, cx, cy, s, seed=0.0):
+    rnd = random.Random(seed)
+    rot = rnd.uniform(0, math.tau)
+    n = rnd.choice((4, 5, 6, 7))
+    pts = []
+    for i in range(n * 2):
+        if i % 2 == 0:
+            r = s * rnd.uniform(0.75, 1.25)
+        else:
+            r = s * rnd.uniform(0.15, 0.35)
+        ang = rot + math.pi * i / n
+        pts.append(QPointF(cx + math.cos(ang) * r, cy + math.sin(ang) * r))
+    p.setBrush(WHITE)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF(pts))
+
+
+def _draw_note(p, cx, cy, s, seed=0.0):
+    rnd = random.Random(seed)
+    # головка смещена, наклонена, стебель разной длины, хвостик по-разному загибается
+    head_dx = rnd.uniform(-0.20, 0.20)
+    head_dy = rnd.uniform(0.35, 0.65)
+    head_rx = s * rnd.uniform(0.26, 0.36)
+    head_ry = s * rnd.uniform(0.20, 0.30)
+    stem_dx = rnd.uniform(0.00, 0.15)
+    stem_top = rnd.uniform(-0.95, -0.70)
+    stem_w = s * rnd.uniform(0.11, 0.18)
+    curve_x = rnd.uniform(0.55, 0.95)
+    curve_y1 = rnd.uniform(-0.85, -0.60)
+    curve_y2 = rnd.uniform(-0.15, 0.10)
+    curve_end_x = rnd.uniform(0.20, 0.40)
+    curve_end_y = rnd.uniform(-0.30, -0.10)
+
+    p.setBrush(PURPLE)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.save()
+    p.translate(cx + s * head_dx, cy + s * head_dy)
+    p.rotate(rnd.uniform(-25, 25))
+    p.drawEllipse(QPointF(0, 0), head_rx, head_ry)
+    p.restore()
+    p.drawRect(QRectF(cx + s * stem_dx, cy + s * stem_top,
+                      stem_w, s * (head_dy - stem_top)))
+    path = QPainterPath()
+    path.moveTo(cx + s * (stem_dx + 0.09), cy + s * stem_top)
+    path.cubicTo(cx + s * curve_x, cy + s * curve_y1,
+                 cx + s * curve_x, cy + s * curve_y2,
+                 cx + s * curve_end_x, cy + s * curve_end_y)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(PURPLE, max(1.5, s * 0.20), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawPath(path)
+
+
+def _draw_text_emotion(p, cx, cy, s, text, color, seed=0.0):
+    rnd = random.Random(seed)
+    font = QFont("Consolas", max(10, int(s * 1.6)))
+    font.setBold(True)
+    font.setItalic(rnd.random() < 0.5)
+    p.save()
+    p.translate(cx, cy)
+    p.rotate(rnd.uniform(-22, 22))      # лёгкий наклон
+    p.setFont(font)
+    rect = QRectF(-s * 1.8, -s * 1.8, s * 3.6, s * 3.6)
+    p.setPen(color)
+    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    p.restore()
+
+
+def draw_emotion(p, kind, cx, cy, s, seed=0.0):
+    if kind == "heart":      _draw_heart(p, cx, cy, s, seed)
+    elif kind == "bolt":     _draw_bolt(p, cx, cy, s, seed)
+    elif kind == "star":     _draw_star(p, cx, cy, s, seed)
+    elif kind == "spark":    _draw_spark(p, cx, cy, s, seed)
+    elif kind == "note":     _draw_note(p, cx, cy, s, seed)
+    elif kind == "question": _draw_text_emotion(p, cx, cy, s, "?", CYAN, seed)
+    elif kind == "zzz":      _draw_text_emotion(p, cx, cy, s, "Z", PURPLE, seed)
+    elif kind == "exclaim":  _draw_text_emotion(p, cx, cy, s, "!", PINK, seed)
+
 
 BOLT_STYLES = ("jagged", "zigzag", "twin", "forked", "broken")
 
@@ -475,10 +657,12 @@ class Avatar(QWidget):
         self.mode = "idle"           # idle / listening / thinking / speaking
         self.mode_until = 0.0
         self.hide_at = 0.0
-        self.hide_after = 12.0
+        self.hide_after = 30.0
         self.subtitle = ""
         self.k = 0                   # кадров в текущей фазе
         self.t = 0
+        self.emotions = []      # активные парящие эмоции
+        self.emotion_cd = 0.0   # секунд до следующего спавна
         self.burst = 0
         self.burst_level = 0.0
         self.lag = 0
@@ -615,6 +799,8 @@ class Avatar(QWidget):
         self.base = self.poses[idx]
         self.burst, self.burst_level = random.randint(5, 9), 1.0
         self.next_pose = time.time() + random.uniform(12, 30)
+        self._burst_emotion("spark", 4)
+        self._burst_emotion("star", 3)
 
     def summon(self):
         self.stop_roam()
@@ -626,6 +812,11 @@ class Avatar(QWidget):
         if not self.user_moved:
             self.move(self._random_spot())  # каждый раз появляется в новом месте экрана
         self.state, self.k = "appearing", 0
+
+        self._burst_emotion("heart", 5)
+        if random.random() < 0.6:
+            self._burst_emotion("spark", 3)
+
         self.hide_at = 0
         self.show()
         self.raise_()
@@ -639,6 +830,7 @@ class Avatar(QWidget):
             self.anim, self.anim_start, self.anim_loop = name, time.time(), loop
 
     def set_mode(self, mode, seconds=0.0):
+        prev = self.mode
         if mode == "thinking" and self.mode != "thinking":
             self.play_anim("eyes", loop=True)
         elif mode != "thinking" and self.anim == "eyes":
@@ -650,14 +842,88 @@ class Avatar(QWidget):
         self.hide_at = time.time() + self.hide_after if mode == "idle" else 0
         self.burst, self.burst_level = random.randint(3, 6), random.uniform(.4, .9)
 
+        if mode != prev:
+            burst = {"listening": ("spark", 3),
+                     "speaking": ("bolt", 3),
+                     "thinking": ("question", 2)}.get(mode)
+            if burst:
+                self._burst_emotion(burst[0], burst[1])
+
     def set_subtitle(self, text):
         self.subtitle = text or ""
 
+    
+    # ---------- эмоции над головой ----------
+    def _emotion_spawn_point(self):
+        # выше головы: для рисованной — от глаза, для кастомных поз — верхняя треть
+        if self.eye_pos is not None:
+            base_y = self.eye_pos[1] - 75
+        else:
+            base_y = FIG_H * 0.28
+        x = W * 0.5 + random.uniform(-W * 0.32, W * 0.32)
+        y = base_y + random.uniform(-25, 25)
+        return x, y
+
+    def _burst_emotion(self, kind, n=1):
+        for _ in range(n):
+            x, y = self._emotion_spawn_point()
+            self.emotions.append(Emotion(kind, x, y))
+
+    def burst_emotions_now(self, kind="heart", n=10):
+        """Принудительный салют — для проверки/теста."""
+        self._burst_emotion(kind, n)
+
+    def _maybe_spawn_emotion(self):
+        if self.emotion_cd > 0:
+            return
+        if len(self.emotions) > 100:
+            return
+        table = MODE_EMOTIONS.get(self.mode, MODE_EMOTIONS["idle"])
+        kinds, weights = zip(*table)
+        kind = random.choices(kinds, weights=weights)[0]
+        x, y = self._emotion_spawn_point()
+        self.emotions.append(Emotion(kind, x, y))
+        rate = EMOTION_RATE.get(self.mode, 1.4)
+        self.emotion_cd = rate * random.uniform(0.6, 1.4)
+
+    def _update_emotions(self, dt):
+        alive = []
+        for e in self.emotions:
+            e.life -= dt
+            if e.life <= 0:
+                continue
+            e.x += e.vx * dt
+            e.y += e.vy * dt
+            e.vy += 14 * dt
+            alive.append(e)
+        self.emotions = alive
+
+    def _draw_emotions(self, p):
+        for e in self.emotions:
+            t = max(0.0, e.life / e.max_life)
+            alpha = 1.0 if t > 0.35 else t / 0.35
+            wob = math.sin(e.phase + (e.max_life - e.life) * 7.0) * 4.5
+            s = e.size * (0.85 + 0.15 * t)
+            p.save()
+            p.setOpacity(alpha)
+            draw_emotion(p, e.kind, e.x + wob, e.y, s, seed=e.phase)   # <-- seed
+            p.restore()
+            
     # ---------- анимация ----------
     def tick(self):
         self.t += 1
         self.k += 1
         now = time.time()
+
+        # --- эмоции обновляем всегда, до любых early-return ---
+        prev = getattr(self, "_prev_now", now)
+        self._prev_now = now
+        dt = min(0.1, now - prev)
+        self._update_emotions(dt)
+        self.emotion_cd -= dt
+        if self.state in ("visible", "appearing"):
+            self._maybe_spawn_emotion()
+        
         if self.state == "appearing" and self.k >= APPEAR_FRAMES:
             self.state, self.k = "visible", 0
         elif self.state == "vanishing" and self.k >= VANISH_FRAMES:
@@ -673,6 +939,7 @@ class Avatar(QWidget):
                     self.move(self.home_pos)
             return
         if self.state == "hidden":
+            self.emotions.clear()
             return
         if self.mode_until and now > self.mode_until:
             self.set_mode("idle")
@@ -848,6 +1115,7 @@ class Avatar(QWidget):
         p.drawLine(0, roll, W, roll)
         p.setCompositionMode(CM.CompositionMode_SourceOver)
 
+        self._draw_emotions(p)
         p.resetTransform()
         self._hud(p, glitch)
         p.end()
